@@ -4,7 +4,9 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 
-# Configurazione pagina
+# ---------------------------------------------------------
+# CONFIGURAZIONE PAGINA
+# ---------------------------------------------------------
 st.set_page_config(
     page_title="Portale Manutenzioni MAM", page_icon="🛠️", layout="wide"
 )
@@ -22,7 +24,9 @@ TIPI_INTERVENTO = ["Elettrico", "Meccanico", "Elettro-meccanico", "Altro"]
 PRIORITA = ["Bassa", "Media", "Alta", "Urgente (Fermo Macchina)"]
 STATI = ["Aperta", "In Corso", "Risolta", "Annullata"]
 
-# Database utenti dimostrativo (Password gestite tramite Hash SHA-256)
+# ---------------------------------------------------------
+# GESTIONE UTENTI (PASSWORD HASHED)
+# ---------------------------------------------------------
 UTENTI_DB = {
     "op_attrezzeria": {
         "nome": "Operatore Attrezzeria",
@@ -55,12 +59,13 @@ def verify_password(password, hashed_password):
     return hashlib.sha256(password.encode()).hexdigest() == hashed_password
 
 
-# Database SQLite
+# ---------------------------------------------------------
+# DATABASE SQLITE & MIGRATION AUTOMATICA
+# ---------------------------------------------------------
 def get_connection():
     return sqlite3.connect("manutenzioni_mam.db")
 
 
-def init_db():
 def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -80,7 +85,7 @@ def init_db():
             )
         """)
 
-        # 2. Migration automatica: aggiunge la colonna 'utente_creatore' se manca
+        # 2. Aggiunge automaticamente la colonna utente_creatore se manca nei vecchi DB
         cursor.execute("PRAGMA table_info(richieste)")
         colonne = [col[1] for col in cursor.fetchall()]
         if "utente_creatore" not in colonne:
@@ -89,25 +94,17 @@ def init_db():
             )
 
 
-# --- Sostituisci la selezione dell'ID nel menu MAM con questo blocco ---
-col_id, _ = st.columns([1, 3])
+init_db()
 
-with col_id:
-    # Selectbox con solo gli ID realmente esistenti per evitare errori di indice
-    id_selezionato = st.selectbox(
-        "Seleziona ID Richiesta", options=df["id"].tolist()
-    )
-
-record_attuale = df[df["id"] == id_selezionato]
-
-if not record_attuale.empty:
-    rec = record_attuale.iloc[0]
-    utente_creatore = rec.get("utente_creatore") or "N/D"
-
-    st.caption(
-        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | Inviato da: {utente_creatore}"
-    )
-
+# ---------------------------------------------------------
+# SESSIONE ED AUTENTICAZIONE
+# ---------------------------------------------------------
+if "autenticato" not in st.session_state:
+    st.session_state["autenticato"] = False
+    st.session_state["username"] = None
+    st.session_state["ruolo"] = None
+    st.session_state["nome_utente"] = None
+    st.session_state["reparto_utente"] = None
 
 
 def login_screen():
@@ -154,11 +151,13 @@ def logout():
     st.rerun()
 
 
-# --- APPLICAZIONE PRINCIPALE ---
+# ---------------------------------------------------------
+# APPLICAZIONE PRINCIPALE
+# ---------------------------------------------------------
 if not st.session_state["autenticato"]:
     login_screen()
 else:
-    # Barra laterale info utente e Logout
+    # Sidebar Info Utente
     st.sidebar.title(f"👤 {st.session_state['nome_utente']}")
     st.sidebar.caption(
         f"**Ruolo:** {st.session_state['ruolo']} | **Reparto:** {st.session_state['reparto_utente']}"
@@ -176,14 +175,14 @@ else:
             "Nuova Richiesta",
             "Analisi & Report",
         ]
-    else:  # Ruolo 'Reparto'
+    else:
         opzioni_menu = ["Nuova Richiesta", "I Miei Interventi"]
 
     menu = st.sidebar.radio("Navigazione", opzioni_menu)
     st.title("🛠️ Portale Gestione Manutenzioni MAM")
 
     # ---------------------------------------------------------
-    # 1. NUOVA RICHIESTA (Reparti + MAM)
+    # 1. NUOVA RICHIESTA
     # ---------------------------------------------------------
     if menu == "Nuova Richiesta":
         st.subheader("Invia una nuova segnalazione di manutenzione")
@@ -315,19 +314,22 @@ else:
                 col_id, _ = st.columns([1, 3])
 
                 with col_id:
-                    id_selezionato = st.number_input(
-                        "ID Richiesta da modificare",
-                        min_value=int(df["id"].min()),
-                        max_value=int(df["id"].max()),
-                        step=1,
+                    id_selezionato = st.selectbox(
+                        "Seleziona ID Richiesta", options=df["id"].tolist()
                     )
 
                 record_attuale = df[df["id"] == id_selezionato]
 
                 if not record_attuale.empty:
                     rec = record_attuale.iloc[0]
+                    utente_creatore = (
+                        rec.get("utente_creatore")
+                        if pd.notna(rec.get("utente_creatore"))
+                        else "N/D"
+                    )
+
                     st.caption(
-                        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | Inviato da: {rec['utente_creatore']}"
+                        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | Inviato da: {utente_creatore}"
                     )
 
                     with st.form("form_aggiorna"):
@@ -343,12 +345,16 @@ else:
                             tecnico = st.text_input(
                                 "Tecnico MAM Assegnato",
                                 value=rec["tecnico_mam"]
-                                or st.session_state["nome_utente"],
+                                if pd.notna(rec["tecnico_mam"])
+                                and rec["tecnico_mam"] != ""
+                                else st.session_state["nome_utente"],
                             )
                         with c2:
                             note = st.text_area(
                                 "Note d'intervento / Componenti sostituiti",
-                                value=rec["note_mam"],
+                                value=rec["note_mam"]
+                                if pd.notna(rec["note_mam"])
+                                else "",
                             )
 
                         btn_salva = st.form_submit_button("💾 Salva Modifiche")
