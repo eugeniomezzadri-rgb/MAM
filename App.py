@@ -80,7 +80,9 @@ def init_db():
                 descrizione TEXT,
                 stato TEXT,
                 tecnico_mam TEXT,
-                note_mam TEXT
+                note_mam TEXT,
+                utente_creatore TEXT,
+                data_chiusura TEXT
             )
         """)
 
@@ -89,6 +91,10 @@ def init_db():
         if "utente_creatore" not in colonne:
             cursor.execute(
                 "ALTER TABLE richieste ADD COLUMN utente_creatore TEXT"
+            )
+        if "data_chiusura" not in colonne:
+            cursor.execute(
+                "ALTER TABLE richieste ADD COLUMN data_chiusura TEXT"
             )
 
 
@@ -188,9 +194,6 @@ else:
             col1, col2 = st.columns(2)
 
             with col1:
-                # REGOLE DI SELEZIONE REPARTO:
-                # - Se MAM: sceglie liberamente da tutti i reparti
-                # - Se Operatore Reparto: bloccato sul proprio reparto
                 if st.session_state["ruolo"] == "MAM":
                     reparto = st.selectbox("Reparto richiedente *", REPARTI)
                 else:
@@ -223,15 +226,17 @@ else:
                 if not macchinario or not descrizione:
                     st.error("Compilare tutti i campi obbligatori (*).")
                 else:
-                    data_ora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    data_ora_apertura = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
                     with get_connection() as conn:
                         conn.execute(
                             """
-                            INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore)
-                            VALUES (?, ?, ?, ?, ?, ?, 'Aperta', '', '', ?)
+                            INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore, data_chiusura)
+                            VALUES (?, ?, ?, ?, ?, ?, 'Aperta', '', '', ?, '')
                         """,
                             (
-                                data_ora,
+                                data_ora_apertura,
                                 reparto,
                                 macchinario,
                                 tipo_intervento,
@@ -241,7 +246,7 @@ else:
                             ),
                         )
                     st.success(
-                        f"Richiesta inoltrata con successo al team MAM per il reparto {reparto}!"
+                        f"Richiesta inoltrata con successo al team MAM per il reparto {reparto} in data {data_ora_apertura}!"
                     )
 
     # ---------------------------------------------------------
@@ -254,7 +259,22 @@ else:
 
         with get_connection() as conn:
             df = pd.read_sql_query(
-                "SELECT id, data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam FROM richieste WHERE reparto = ? ORDER BY id DESC",
+                """
+                SELECT 
+                    id AS [ID], 
+                    data_ora AS [Data Apertura], 
+                    data_chiusura AS [Data Chiusura], 
+                    macchinario AS [Macchinario], 
+                    tipo_intervento AS [Tipo Intervento], 
+                    priorita AS [Priorità], 
+                    descrizione AS [Descrizione], 
+                    stato AS [Stato], 
+                    tecnico_mam AS [Tecnico MAM], 
+                    note_mam AS [Note MAM] 
+                FROM richieste 
+                WHERE reparto = ? 
+                ORDER BY id DESC
+            """,
                 conn,
                 params=(st.session_state["reparto_utente"],),
             )
@@ -326,9 +346,16 @@ else:
                         if pd.notna(rec.get("utente_creatore"))
                         else "N/D"
                     )
+                    dt_apertura = rec.get("data_ora") or "N/D"
+                    dt_chiusura = (
+                        rec.get("data_chiusura")
+                        if pd.notna(rec.get("data_chiusura"))
+                        and rec.get("data_chiusura") != ""
+                        else "In Corso / Aperta"
+                    )
 
                     st.caption(
-                        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | Inviato da: {utente_creatore}"
+                        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | **Apertura:** {dt_apertura} | **Chiusura:** {dt_chiusura} | **Inviato da:** {utente_creatore}"
                     )
 
                     with st.form("form_aggiorna"):
@@ -359,17 +386,39 @@ else:
                         btn_salva = st.form_submit_button("💾 Salva Modifiche")
 
                         if btn_salva:
+                            # Gestione automatica della Data di Chiusura
+                            chiusura_esistente = (
+                                rec.get("data_chiusura")
+                                if pd.notna(rec.get("data_chiusura"))
+                                else ""
+                            )
+
+                            if nuovo_stato in ["Risolta", "Annullata"]:
+                                if not chiusura_esistente:
+                                    nuova_data_chiusura = (
+                                        datetime.now().strftime(
+                                            "%Y-%m-%d %H:%M:%S"
+                                        )
+                                    )
+                                else:
+                                    nuova_data_chiusura = chiusura_esistente
+                            else:
+                                nuova_data_chiusura = (
+                                    ""  # Resetta se riportata su Aperta/In Corso
+                                )
+
                             with get_connection() as conn:
                                 conn.execute(
                                     """
                                     UPDATE richieste 
-                                    SET stato = ?, tecnico_mam = ?, note_mam = ?
+                                    SET stato = ?, tecnico_mam = ?, note_mam = ?, data_chiusura = ?
                                     WHERE id = ?
                                 """,
                                     (
                                         nuovo_stato,
                                         tecnico,
                                         note,
+                                        nuova_data_chiusura,
                                         id_selezionato,
                                     ),
                                 )
@@ -393,13 +442,36 @@ else:
             if df.empty:
                 st.info("Dati insufficienti per generare report.")
             else:
-                kpi1, kpi2, kpi3 = st.columns(3)
+                # Calcolo Tempo Medio di Risoluzione
+                df_risolte = df[
+                    (df["stato"] == "Risolta")
+                    & (df["data_chiusura"].notna())
+                    & (df["data_chiusura"] != "")
+                ].copy()
+
+                tempo_medio_str = "N/D"
+                if not df_risolte.empty:
+                    df_risolte["dt_apertura"] = pd.to_datetime(
+                        df_risolte["data_ora"], errors="coerce"
+                    )
+                    df_risolte["dt_chiusura"] = pd.to_datetime(
+                        df_risolte["data_chiusura"], errors="coerce"
+                    )
+                    df_risolte["ore_risoluzione"] = (
+                        df_risolte["dt_chiusura"] - df_risolte["dt_apertura"]
+                    ).dt.total_seconds() / 3600
+                    media_ore = df_risolte["ore_risoluzione"].mean()
+                    if pd.notna(media_ore):
+                        tempo_medio_str = f"{media_ore:.1f} ore"
+
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
                 kpi1.metric("Totale Richieste", len(df))
                 kpi2.metric(
                     "Aperte / In Corso",
                     len(df[df["stato"].isin(["Aperta", "In Corso"])]),
                 )
                 kpi3.metric("Risolte", len(df[df["stato"] == "Risolta"]))
+                kpi4.metric("Tempo Medio Risoluzione", tempo_medio_str)
 
                 st.markdown("---")
                 col_c1, col_c2 = st.columns(2)
