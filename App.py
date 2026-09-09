@@ -61,8 +61,11 @@ def get_connection():
 
 
 def init_db():
+def init_db():
     with get_connection() as conn:
-        conn.execute("""
+        cursor = conn.cursor()
+        # 1. Crea la tabella se non esiste
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS richieste (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 data_ora TEXT,
@@ -73,21 +76,38 @@ def init_db():
                 descrizione TEXT,
                 stato TEXT,
                 tecnico_mam TEXT,
-                note_mam TEXT,
-                utente_creatore TEXT
+                note_mam TEXT
             )
         """)
 
+        # 2. Migration automatica: aggiunge la colonna 'utente_creatore' se manca
+        cursor.execute("PRAGMA table_info(richieste)")
+        colonne = [col[1] for col in cursor.fetchall()]
+        if "utente_creatore" not in colonne:
+            cursor.execute(
+                "ALTER TABLE richieste ADD COLUMN utente_creatore TEXT"
+            )
 
-init_db()
 
-# --- GESTIONE SESSIONE ED AUTENTICAZIONE ---
-if "autenticato" not in st.session_state:
-    st.session_state["autenticato"] = False
-    st.session_state["username"] = None
-    st.session_state["ruolo"] = None
-    st.session_state["nome_utente"] = None
-    st.session_state["reparto_utente"] = None
+# --- Sostituisci la selezione dell'ID nel menu MAM con questo blocco ---
+col_id, _ = st.columns([1, 3])
+
+with col_id:
+    # Selectbox con solo gli ID realmente esistenti per evitare errori di indice
+    id_selezionato = st.selectbox(
+        "Seleziona ID Richiesta", options=df["id"].tolist()
+    )
+
+record_attuale = df[df["id"] == id_selezionato]
+
+if not record_attuale.empty:
+    rec = record_attuale.iloc[0]
+    utente_creatore = rec.get("utente_creatore") or "N/D"
+
+    st.caption(
+        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | Inviato da: {utente_creatore}"
+    )
+
 
 
 def login_screen():
