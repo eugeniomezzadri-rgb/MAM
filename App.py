@@ -69,7 +69,6 @@ def get_connection():
 def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
-        # 1. Crea la tabella se non esiste
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS richieste (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,7 +84,6 @@ def init_db():
             )
         """)
 
-        # 2. Aggiunge automaticamente la colonna utente_creatore se manca nei vecchi DB
         cursor.execute("PRAGMA table_info(richieste)")
         colonne = [col[1] for col in cursor.fetchall()]
         if "utente_creatore" not in colonne:
@@ -157,7 +155,6 @@ def logout():
 if not st.session_state["autenticato"]:
     login_screen()
 else:
-    # Sidebar Info Utente
     st.sidebar.title(f"👤 {st.session_state['nome_utente']}")
     st.sidebar.caption(
         f"**Ruolo:** {st.session_state['ruolo']} | **Reparto:** {st.session_state['reparto_utente']}"
@@ -191,15 +188,17 @@ else:
             col1, col2 = st.columns(2)
 
             with col1:
-                default_reparto = st.session_state["reparto_utente"]
-                if default_reparto in REPARTI:
+                # REGOLE DI SELEZIONE REPARTO:
+                # - Se MAM: sceglie liberamente da tutti i reparti
+                # - Se Operatore Reparto: bloccato sul proprio reparto
+                if st.session_state["ruolo"] == "MAM":
+                    reparto = st.selectbox("Reparto richiedente *", REPARTI)
+                else:
                     reparto = st.selectbox(
                         "Reparto richiedente *",
-                        REPARTI,
-                        index=REPARTI.index(default_reparto),
+                        options=[st.session_state["reparto_utente"]],
+                        disabled=True,
                     )
-                else:
-                    reparto = st.selectbox("Reparto richiedente *", REPARTI)
 
                 macchinario = st.text_input(
                     "Macchinario / Sigla Impianto *",
