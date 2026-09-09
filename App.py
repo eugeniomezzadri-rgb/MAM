@@ -1,13 +1,15 @@
-import sqlite3
 from datetime import datetime
+import hashlib
+import sqlite3
 import pandas as pd
 import streamlit as st
 
-# Configuratione della pagina
+# Configurazione pagina
 st.set_page_config(
     page_title="Portale Manutenzioni MAM", page_icon="🛠️", layout="wide"
 )
 
+# Costanti di sistema
 REPARTI = [
     "ATTREZZERIA",
     "CONFEZIONAMENTO",
@@ -20,8 +22,40 @@ TIPI_INTERVENTO = ["Elettrico", "Meccanico", "Elettro-meccanico", "Altro"]
 PRIORITA = ["Bassa", "Media", "Alta", "Urgente (Fermo Macchina)"]
 STATI = ["Aperta", "In Corso", "Risolta", "Annullata"]
 
+# Database utenti dimostrativo (Password gestite tramite Hash SHA-256)
+UTENTI_DB = {
+    "op_attrezzeria": {
+        "nome": "Operatore Attrezzeria",
+        "password_hash": hashlib.sha256("password123".encode()).hexdigest(),
+        "ruolo": "Reparto",
+        "reparto": "ATTREZZERIA",
+    },
+    "op_montaggi": {
+        "nome": "Operatore Montaggi",
+        "password_hash": hashlib.sha256("password123".encode()).hexdigest(),
+        "ruolo": "Reparto",
+        "reparto": "MONTAGGI",
+    },
+    "tecnico_mam": {
+        "nome": "Luca Bianchi (Tecnico MAM)",
+        "password_hash": hashlib.sha256("mam2026".encode()).hexdigest(),
+        "ruolo": "MAM",
+        "reparto": "MAM",
+    },
+    "admin_mam": {
+        "nome": "Responsabile MAM",
+        "password_hash": hashlib.sha256("admin2026".encode()).hexdigest(),
+        "ruolo": "MAM",
+        "reparto": "MAM",
+    },
+}
 
-# Inizializzazione Database SQLite
+
+def verify_password(password, hashed_password):
+    return hashlib.sha256(password.encode()).hexdigest() == hashed_password
+
+
+# Database SQLite
 def get_connection():
     return sqlite3.connect("manutenzioni_mam.db")
 
@@ -39,195 +73,318 @@ def init_db():
                 descrizione TEXT,
                 stato TEXT,
                 tecnico_mam TEXT,
-                note_mam TEXT
+                note_mam TEXT,
+                utente_creatore TEXT
             )
         """)
 
 
 init_db()
 
-st.title("🛠️ Portale Gestione Manutenzioni MAM")
+# --- GESTIONE SESSIONE ED AUTENTICAZIONE ---
+if "autenticato" not in st.session_state:
+    st.session_state["autenticato"] = False
+    st.session_state["username"] = None
+    st.session_state["ruolo"] = None
+    st.session_state["nome_utente"] = None
+    st.session_state["reparto_utente"] = None
 
-# Navigazione principale
-menu = st.sidebar.radio(
-    "Navigazione",
-    [
-        "Nuova Richiesta (Reparti)",
-        "Gestione Interventi (MAM)",
-        "Analisi & Report",
-    ],
-)
 
-# ---------------------------------------------------------
-# 1. NUOVA RICHIESTA
-# ---------------------------------------------------------
-if menu == "Nuova Richiesta (Reparti)":
-    st.subheader("Invia una nuova segnalazione di manutenzione")
+def login_screen():
+    st.title("🛠️ Portale Manutenzioni MAM - Accesso")
+    st.subheader("Inserisci le tue credenziali aziendali")
 
-    with st.form("form_richiesta", clear_on_submit=True):
-        col1, col2 = st.columns(2)
+    col_login, _ = st.columns([1, 1])
+    with col_login:
+        with st.form("form_login"):
+            username = st.text_input("Username").strip().lower()
+            password = st.text_input("Password", type="password")
+            btn_login = st.form_submit_button("Accedi")
 
-        with col1:
-            reparto = st.selectbox("Reparto richiedente *", REPARTI)
-            macchinario = st.text_input(
-                "Macchinario / Sigla Impianto *",
-                placeholder="es. Trancia T-04",
-            )
-            tipo_intervento = st.selectbox("Tipo Intervento", TIPI_INTERVENTO)
+            if btn_login:
+                if username in UTENTI_DB and verify_password(
+                    password, UTENTI_DB[username]["password_hash"]
+                ):
+                    user_info = UTENTI_DB[username]
+                    st.session_state["autenticato"] = True
+                    st.session_state["username"] = username
+                    st.session_state["nome_utente"] = user_info["nome"]
+                    st.session_state["ruolo"] = user_info["ruolo"]
+                    st.session_state["reparto_utente"] = user_info["reparto"]
+                    st.success(f"Benvenuto, {user_info['nome']}!")
+                    st.rerun()
+                else:
+                    st.error("Username o password non corretti.")
 
-        with col2:
-            priorita = st.select_slider(
-                "Livello di Priorità *", options=PRIORITA, value="Media"
-            )
-            descrizione = st.text_area(
-                "Descrizione del guasto o intervento richiesto *",
-                placeholder="Descrivi dettagliatamente il problema...",
-            )
+        st.info("""
+        **Credenziali Demo per Prova:**
+        * **Operatore Attrezzeria:** `op_attrezzeria` / `password123`
+        * **Operatore Montaggi:** `op_montaggi` / `password123`
+        * **Tecnico MAM:** `tecnico_mam` / `mam2026`
+        * **Admin MAM:** `admin_mam` / `admin2026`
+        """)
 
-        submitted = st.form_submit_button(" Invia Richiesta a MAM")
 
-        if submitted:
-            if not macchinario or not descrizione:
-                st.error("Compilare tutti i campi obbligatori (*).")
-            else:
-                data_ora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                with get_connection() as conn:
-                    conn.execute(
-                        """
-                        INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam)
-                        VALUES (?, ?, ?, ?, ?, ?, 'Aperta', '', '')
-                    """,
-                        (
-                            data_ora,
-                            reparto,
-                            macchinario,
-                            tipo_intervento,
-                            priorita,
-                            descrizione,
-                        ),
+def logout():
+    st.session_state["autenticato"] = False
+    st.session_state["username"] = None
+    st.session_state["ruolo"] = None
+    st.session_state["nome_utente"] = None
+    st.session_state["reparto_utente"] = None
+    st.rerun()
+
+
+# --- APPLICAZIONE PRINCIPALE ---
+if not st.session_state["autenticato"]:
+    login_screen()
+else:
+    # Barra laterale info utente e Logout
+    st.sidebar.title(f"👤 {st.session_state['nome_utente']}")
+    st.sidebar.caption(
+        f"**Ruolo:** {st.session_state['ruolo']} | **Reparto:** {st.session_state['reparto_utente']}"
+    )
+
+    if st.sidebar.button("🚪 Disconnetti (Logout)"):
+        logout()
+
+    st.sidebar.markdown("---")
+
+    # Menu dinamico in base al ruolo
+    if st.session_state["ruolo"] == "MAM":
+        opzioni_menu = [
+            "Gestione Interventi (MAM)",
+            "Nuova Richiesta",
+            "Analisi & Report",
+        ]
+    else:  # Ruolo 'Reparto'
+        opzioni_menu = ["Nuova Richiesta", "I Miei Interventi"]
+
+    menu = st.sidebar.radio("Navigazione", opzioni_menu)
+    st.title("🛠️ Portale Gestione Manutenzioni MAM")
+
+    # ---------------------------------------------------------
+    # 1. NUOVA RICHIESTA (Reparti + MAM)
+    # ---------------------------------------------------------
+    if menu == "Nuova Richiesta":
+        st.subheader("Invia una nuova segnalazione di manutenzione")
+
+        with st.form("form_richiesta", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                default_reparto = st.session_state["reparto_utente"]
+                if default_reparto in REPARTI:
+                    reparto = st.selectbox(
+                        "Reparto richiedente *",
+                        REPARTI,
+                        index=REPARTI.index(default_reparto),
                     )
-                st.success(
-                    f"Richiesta inoltrata con successo al team MAM per il reparto {reparto}!"
+                else:
+                    reparto = st.selectbox("Reparto richiedente *", REPARTI)
+
+                macchinario = st.text_input(
+                    "Macchinario / Sigla Impianto *",
+                    placeholder="es. Trancia T-04",
+                )
+                tipo_intervento = st.selectbox(
+                    "Tipo Intervento", TIPI_INTERVENTO
                 )
 
-# ---------------------------------------------------------
-# 2. GESTIONE INTERVENTI (MAM)
-# ---------------------------------------------------------
-elif menu == "Gestione Interventi (MAM)":
-    st.subheader("Pannello Controllo Manutenzioni - Team MAM")
+            with col2:
+                priorita = st.select_slider(
+                    "Livello di Priorità *", options=PRIORITA, value="Media"
+                )
+                descrizione = st.text_area(
+                    "Descrizione del guasto o intervento richiesto *",
+                    placeholder="Descrivi dettagliatamente il problema...",
+                )
 
-    with get_connection() as conn:
-        df = pd.read_sql_query(
-            "SELECT * FROM richieste ORDER BY id DESC", conn
-        )
+            submitted = st.form_submit_button("🚀 Invia Richiesta a MAM")
 
-    if df.empty:
-        st.info("Nessuna richiesta di manutenzione presente a sistema.")
-    else:
-        # Filtri rapidi
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            filtro_stato = st.multiselect(
-                "Filtra per Stato",
-                STATI,
-                default=["Aperta", "In Corso"],
-            )
-        with col_f2:
-            filtro_reparto = st.multiselect("Filtra per Reparto", REPARTI)
-
-        df_filtrato = df.copy()
-        if filtro_stato:
-            df_filtrato = df_filtrato[df_filtrato["stato"].isin(filtro_stato)]
-        if filtro_reparto:
-            df_filtrato = df_filtrato[
-                df_filtrato["reparto"].isin(filtro_reparto)
-            ]
-
-        st.dataframe(df_filtrato, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        st.write("### Aggiorna Stato Intervento")
-
-        col_id, col_update = st.columns([1, 3])
-
-        with col_id:
-            id_selezionato = st.number_input(
-                "ID Richiesta",
-                min_value=int(df["id"].min()),
-                max_value=int(df["id"].max()),
-                step=1,
-            )
-
-        record_attuale = df[df["id"] == id_selezionato]
-
-        if not record_attuale.empty:
-            rec = record_attuale.iloc[0]
-            st.caption(
-                f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']})"
-            )
-
-            with st.form("form_aggiorna"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    nuovo_stato = st.selectbox(
-                        "Stato",
-                        STATI,
-                        index=STATI.index(rec["stato"])
-                        if rec["stato"] in STATI
-                        else 0,
-                    )
-                    tecnico = st.text_input(
-                        "Tecnico MAM Assegnato", value=rec["tecnico_mam"]
-                    )
-                with c2:
-                    note = st.text_area(
-                        "Note d'intervento / Componenti sostituiti",
-                        value=rec["note_mam"],
-                    )
-
-                btn_salva = st.form_submit_button("Aggiorna Richiesta")
-
-                if btn_salva:
+            if submitted:
+                if not macchinario or not descrizione:
+                    st.error("Compilare tutti i campi obbligatori (*).")
+                else:
+                    data_ora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     with get_connection() as conn:
                         conn.execute(
                             """
-                            UPDATE richieste 
-                            SET stato = ?, tecnico_mam = ?, note_mam = ?
-                            WHERE id = ?
+                            INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore)
+                            VALUES (?, ?, ?, ?, ?, ?, 'Aperta', '', '', ?)
                         """,
-                            (nuovo_stato, tecnico, note, id_selezionato),
+                            (
+                                data_ora,
+                                reparto,
+                                macchinario,
+                                tipo_intervento,
+                                priorita,
+                                descrizione,
+                                st.session_state["username"],
+                            ),
                         )
-                    st.success(f"Richiesta #{id_selezionato} aggiornata!")
-                    st.rerun()
+                    st.success(
+                        f"Richiesta inoltrata con successo al team MAM per il reparto {reparto}!"
+                    )
 
-# ---------------------------------------------------------
-# 3. ANALISI & REPORT
-# ---------------------------------------------------------
-elif menu == "Analisi & Report":
-    st.subheader("Statistiche e Performance Manutenzioni")
-
-    with get_connection() as conn:
-        df = pd.read_sql_query("SELECT * FROM richieste", conn)
-
-    if df.empty:
-        st.info("Dati insufficienti per generare report.")
-    else:
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric("Totale Richieste", len(df))
-        kpi2.metric(
-            "Aperte / In Corso", len(df[df["stato"].isin(["Aperta", "In Corso"])])
+    # ---------------------------------------------------------
+    # 2. I MIEI INTERVENTI (Solo Reparti)
+    # ---------------------------------------------------------
+    elif menu == "I Miei Interventi":
+        st.subheader(
+            f"Stato interventi per il reparto: {st.session_state['reparto_utente']}"
         )
-        kpi3.metric("Risolte", len(df[df["stato"] == "Risolta"]))
 
-        st.markdown("---")
-        col_c1, col_c2 = st.columns(2)
+        with get_connection() as conn:
+            df = pd.read_sql_query(
+                "SELECT id, data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam FROM richieste WHERE reparto = ? ORDER BY id DESC",
+                conn,
+                params=(st.session_state["reparto_utente"],),
+            )
 
-        with col_c1:
-            st.write("**Richieste per Reparto**")
-            chart_reparti = df["reparto"].value_counts()
-            st.bar_chart(chart_reparti)
+        if df.empty:
+            st.info("Nessuna richiesta inserita per il tuo reparto.")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-        with col_c2:
-            st.write("**Distribuzione per Priorità**")
-            chart_prio = df["priorita"].value_counts()
-            st.bar_chart(chart_prio)
+    # ---------------------------------------------------------
+    # 3. GESTIONE INTERVENTI (Solo MAM)
+    # ---------------------------------------------------------
+    elif menu == "Gestione Interventi (MAM)":
+        if st.session_state["ruolo"] != "MAM":
+            st.error("Accesso non autorizzato. Sezione riservata al team MAM.")
+        else:
+            st.subheader("Pannello Controllo Manutenzioni - Team MAM")
+
+            with get_connection() as conn:
+                df = pd.read_sql_query(
+                    "SELECT * FROM richieste ORDER BY id DESC", conn
+                )
+
+            if df.empty:
+                st.info("Nessuna richiesta di manutenzione presente a sistema.")
+            else:
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    filtro_stato = st.multiselect(
+                        "Filtra per Stato",
+                        STATI,
+                        default=["Aperta", "In Corso"],
+                    )
+                with col_f2:
+                    filtro_reparto = st.multiselect(
+                        "Filtra per Reparto", REPARTI
+                    )
+
+                df_filtrato = df.copy()
+                if filtro_stato:
+                    df_filtrato = df_filtrato[
+                        df_filtrato["stato"].isin(filtro_stato)
+                    ]
+                if filtro_reparto:
+                    df_filtrato = df_filtrato[
+                        df_filtrato["reparto"].isin(filtro_reparto)
+                    ]
+
+                st.dataframe(
+                    df_filtrato, use_container_width=True, hide_index=True
+                )
+
+                st.markdown("---")
+                st.write("### Aggiorna Stato Intervento")
+
+                col_id, _ = st.columns([1, 3])
+
+                with col_id:
+                    id_selezionato = st.number_input(
+                        "ID Richiesta da modificare",
+                        min_value=int(df["id"].min()),
+                        max_value=int(df["id"].max()),
+                        step=1,
+                    )
+
+                record_attuale = df[df["id"] == id_selezionato]
+
+                if not record_attuale.empty:
+                    rec = record_attuale.iloc[0]
+                    st.caption(
+                        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | Inviato da: {rec['utente_creatore']}"
+                    )
+
+                    with st.form("form_aggiorna"):
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            nuovo_stato = st.selectbox(
+                                "Stato",
+                                STATI,
+                                index=STATI.index(rec["stato"])
+                                if rec["stato"] in STATI
+                                else 0,
+                            )
+                            tecnico = st.text_input(
+                                "Tecnico MAM Assegnato",
+                                value=rec["tecnico_mam"]
+                                or st.session_state["nome_utente"],
+                            )
+                        with c2:
+                            note = st.text_area(
+                                "Note d'intervento / Componenti sostituiti",
+                                value=rec["note_mam"],
+                            )
+
+                        btn_salva = st.form_submit_button("💾 Salva Modifiche")
+
+                        if btn_salva:
+                            with get_connection() as conn:
+                                conn.execute(
+                                    """
+                                    UPDATE richieste 
+                                    SET stato = ?, tecnico_mam = ?, note_mam = ?
+                                    WHERE id = ?
+                                """,
+                                    (
+                                        nuovo_stato,
+                                        tecnico,
+                                        note,
+                                        id_selezionato,
+                                    ),
+                                )
+                            st.success(
+                                f"Richiesta #{id_selezionato} aggiornata!"
+                            )
+                            st.rerun()
+
+    # ---------------------------------------------------------
+    # 4. ANALISI & REPORT (Solo MAM)
+    # ---------------------------------------------------------
+    elif menu == "Analisi & Report":
+        if st.session_state["ruolo"] != "MAM":
+            st.error("Accesso non autorizzato. Sezione riservata al team MAM.")
+        else:
+            st.subheader("Statistiche e Performance Manutenzioni")
+
+            with get_connection() as conn:
+                df = pd.read_sql_query("SELECT * FROM richieste", conn)
+
+            if df.empty:
+                st.info("Dati insufficienti per generare report.")
+            else:
+                kpi1, kpi2, kpi3 = st.columns(3)
+                kpi1.metric("Totale Richieste", len(df))
+                kpi2.metric(
+                    "Aperte / In Corso",
+                    len(df[df["stato"].isin(["Aperta", "In Corso"])]),
+                )
+                kpi3.metric("Risolte", len(df[df["stato"] == "Risolta"]))
+
+                st.markdown("---")
+                col_c1, col_c2 = st.columns(2)
+
+                with col_c1:
+                    st.write("**Richieste per Reparto**")
+                    chart_reparti = df["reparto"].value_counts()
+                    st.bar_chart(chart_reparti)
+
+                with col_c2:
+                    st.write("**Distribuzione per Priorità**")
+                    chart_prio = df["priorita"].value_counts()
+                    st.bar_chart(chart_prio)
