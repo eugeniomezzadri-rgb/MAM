@@ -259,7 +259,7 @@ def init_db():
 init_db()
 
 # ---------------------------------------------------------
-# AUTENTICAZIONE E SESSIONE
+# AUTENTICAZIONE E GESTIONE SESSIONE PERSISTENTE
 # ---------------------------------------------------------
 if "autenticato" not in st.session_state:
     st.session_state["autenticato"] = False
@@ -267,6 +267,17 @@ if "autenticato" not in st.session_state:
     st.session_state["ruolo"] = None
     st.session_state["nome_utente"] = None
     st.session_state["reparto_utente"] = None
+
+# RIPRISTINO SESSIONE DA URL (Se la pagina viene aggiornata / F5)
+if not st.session_state["autenticato"] and "user" in st.query_params:
+    user_param = st.query_params["user"]
+    if user_param in UTENTI_DB:
+        user_info = UTENTI_DB[user_param]
+        st.session_state["autenticato"] = True
+        st.session_state["username"] = user_param
+        st.session_state["nome_utente"] = user_info["nome"]
+        st.session_state["ruolo"] = user_info["ruolo"]
+        st.session_state["reparto_utente"] = user_info["reparto"]
 
 
 def login_screen():
@@ -290,6 +301,10 @@ def login_screen():
                     st.session_state["nome_utente"] = user_info["nome"]
                     st.session_state["ruolo"] = user_info["ruolo"]
                     st.session_state["reparto_utente"] = user_info["reparto"]
+
+                    # Salva lo stato nell'URL per persistere dopo il refresh (F5)
+                    st.query_params["user"] = username
+
                     st.success(f"Benvenuto, {user_info['nome']}!")
                     st.rerun()
                 else:
@@ -312,6 +327,9 @@ def logout():
         "reparto_utente",
     ]:
         st.session_state[key] = None if key != "autenticato" else False
+
+    # Rimuove il parametro dall'URL al logout
+    st.query_params.clear()
     st.rerun()
 
 
