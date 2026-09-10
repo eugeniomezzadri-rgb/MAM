@@ -452,7 +452,8 @@ else:
                         "%Y-%m-%d %H:%M:%S"
                     )
                     with get_connection() as conn:
-                        conn.execute(
+                        cursor = conn.cursor()
+                        cursor.execute(
                             """
                             INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore, data_chiusura, origine)
                             VALUES (?, ?, ?, ?, ?, ?, 'Aperta', '', '', ?, '', 'Guasto')
@@ -467,10 +468,12 @@ else:
                                 st.session_state["username"],
                             ),
                         )
+                        ticket_id = cursor.lastrowid  # <--- RECUPERA ID TICKET
 
-                    # INVIO NOTIFICA AUTOMATICA SU TELEGRAM
+                    # NOTIFICA TELEGRAM IN APERTURA (CON ID TICKET)
                     msg_telegram = (
-                        f"🚨 *NUOVA SEGNALAZIONE MANUTENZIONE*\n\n"
+                        f"🚨 *NUOVA SEGNALAZIONE MANUTENZIONE*\n"
+                        f"🎫 *Ticket N°:* #{ticket_id}\n\n"
                         f"📍 *Reparto:* {reparto}\n"
                         f"⚙️ *Macchinario:* {macchinario}\n"
                         f"⚡ *Tipo:* {tipo_intervento}\n"
@@ -481,7 +484,7 @@ else:
                     invia_notifica_telegram(msg_telegram)
 
                     st.success(
-                        f"Ticket inviato con successo e notifica Telegram spedita!"
+                        f"Ticket #{ticket_id} inviato con successo e notifica Telegram spedita!"
                     )
 
     # ---------------------------------------------------------
@@ -661,11 +664,18 @@ else:
                             ),
                         )
 
-                    # Notifica Telegram quando un guasto viene risolto
+                    # NOTIFICA TELEGRAM IN CHIUSURA (CON ID TICKET)
                     if nuovo_stato == "Risolta":
-                        invia_notifica_telegram(
-                            f"✅ *GUASTO RISOLTO*\nTicket #{id_selezionato} per *{rec['macchinario']}* chiuso dal tecnico {tecnico}."
+                        msg_chiusura = (
+                            f"✅ *TICKET RISOLTO*\n"
+                            f"🎫 *Ticket N°:* #{id_selezionato}\n\n"
+                            f"⚙️ *Macchinario:* {rec['macchinario']}\n"
+                            f"📍 *Reparto:* {rec['reparto']}\n"
+                            f"👤 *Tecnico:* {tecnico}\n"
+                            f"⏱️ *Ore Impiegate:* {ore_impiegate} h\n"
+                            f"📝 *Note Intervento:* {note if note else 'Nessuna nota'}"
                         )
+                        invia_notifica_telegram(msg_chiusura)
 
                     st.success(
                         f"Ordine di lavoro #{id_selezionato} aggiornato con successo!"
@@ -705,7 +715,8 @@ else:
                 ]["reparto"].values[0]
 
                 with get_connection() as conn:
-                    conn.execute(
+                    cursor = conn.cursor()
+                    cursor.execute(
                         """
                         INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore, data_chiusura, origine)
                         VALUES (?, ?, ?, 'Preventivo', 'Media', ?, 'Aperta', '', '', 'SCHEDULER_MAMU', '', 'Preventiva')
@@ -717,6 +728,7 @@ else:
                             f"[PREVENTIVA PROGRAMMATA] {piano_sel['titolo']}: {piano_sel['descrizione']}",
                         ),
                     )
+                    ticket_id_prev = cursor.lastrowid  # <--- RECUPERA ID TICKET PREVENTIVO
 
                     nuova_scad = (
                         datetime.now()
@@ -728,10 +740,13 @@ else:
                     )
 
                 invia_notifica_telegram(
-                    f"📅 *MANUTENZIONE PREVENTIVA AVVIATA*\nGenerato ordine di lavoro per *{piano_sel['macchinario']}*: {piano_sel['titolo']}"
+                    f"📅 *MANUTENZIONE PREVENTIVA AVVIATA*\n"
+                    f"🎫 *Ticket N°:* #{ticket_id_prev}\n\n"
+                    f"⚙️ *Macchinario:* {piano_sel['macchinario']}\n"
+                    f"📋 *Piano:* {piano_sel['titolo']}"
                 )
                 st.success(
-                    f"Generato con successo Ordine di Lavoro Preventivo per {piano_sel['macchinario']}!"
+                    f"Generato con successo Ordine di Lavoro #{ticket_id_prev} per {piano_sel['macchinario']}!"
                 )
                 st.rerun()
 
