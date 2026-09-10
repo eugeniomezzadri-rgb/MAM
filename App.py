@@ -2,7 +2,46 @@ from datetime import datetime, timedelta
 import hashlib
 import sqlite3
 import pandas as pd
+import requests  # Per inviare chiamate HTTP a Telegram
 import streamlit as st
+
+# ---------------------------------------------------------
+# CONFIGURAZIONE TELEGRAM (Sostituisci con i tuoi dati)
+# ---------------------------------------------------------
+TELEGRAM_BOT_TOKEN = (
+    "8287541966:AAFd8QD3a18u9SlJr-KhZu9dSoc0OaBzkS4"  # es: "7123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
+)
+TELEGRAM_CHAT_ID = "992794613"  # es: "987654321" (il tuo ID personale)
+
+
+def invia_notifica_telegram(messaggio):
+    """Invia un messaggio Telegram al Chat ID configurato"""
+    if (
+        TELEGRAM_BOT_TOKEN == "IL_TUO_TOKEN_BOT_QUI"
+        or TELEGRAM_CHAT_ID == "IL_TUO_CHAT_ID_QUI"
+    ):
+        st.warning(
+            "⚠️ Inserisci TOKEN e CHAT_ID validi per inviare notifiche Telegram."
+        )
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": messaggio,
+        "parse_mode": "Markdown",
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"Errore Telegram ({response.status_code}): {response.text}")
+            return False
+    except Exception as e:
+        st.error(f"Errore connessione Telegram: {e}")
+        return False
+
 
 # ---------------------------------------------------------
 # CONFIGURAZIONE PAGINA STREAMLIT
@@ -34,7 +73,6 @@ PRIORITA = ["Bassa", "Media", "Alta", "Urgente (Fermo Macchina)"]
 STATI = ["Aperta", "In Corso", "Risolta", "Annullata"]
 COSTO_ORARIO_MANODOPERA = 35.0  # €/ora predefinito per il calcolo costi MAMU
 
-# Utenti aziendali (Demo)
 UTENTI_DB = {
     "op_attrezzeria": {
         "nome": "Operatore Attrezzeria",
@@ -78,7 +116,6 @@ def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # 1. Registro Macchine (Assets)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS macchine (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,7 +128,6 @@ def init_db():
             )
         """)
 
-        # 2. Ticket / Ordini di Lavoro
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS richieste (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +149,6 @@ def init_db():
             )
         """)
 
-        # 3. Magazzino Ricambi
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ricambi (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,7 +160,6 @@ def init_db():
             )
         """)
 
-        # 4. Registro Consumo Ricambi negli Interventi
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS utilizzi_ricambi (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,7 +172,6 @@ def init_db():
             )
         """)
 
-        # 5. Schedulario Manutenzione Preventiva
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS piani_preventivi (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,7 +183,6 @@ def init_db():
             )
         """)
 
-        # Popolamento dati demo iniziali se vuoto
         cursor.execute("SELECT COUNT(*) FROM macchine")
         if cursor.fetchone()[0] == 0:
             cursor.executemany(
@@ -268,7 +300,6 @@ if "autenticato" not in st.session_state:
     st.session_state["nome_utente"] = None
     st.session_state["reparto_utente"] = None
 
-# RIPRISTINO SESSIONE DA URL (Se la pagina viene aggiornata / F5)
 if not st.session_state["autenticato"] and "user" in st.query_params:
     user_param = st.query_params["user"]
     if user_param in UTENTI_DB:
@@ -301,21 +332,11 @@ def login_screen():
                     st.session_state["nome_utente"] = user_info["nome"]
                     st.session_state["ruolo"] = user_info["ruolo"]
                     st.session_state["reparto_utente"] = user_info["reparto"]
-
-                    # Salva lo stato nell'URL per persistere dopo il refresh (F5)
                     st.query_params["user"] = username
-
                     st.success(f"Benvenuto, {user_info['nome']}!")
                     st.rerun()
                 else:
                     st.error("Username o password non corretti.")
-
-        st.info("""
-        **Credenziali Demo per la prova:**
-        * **Operatore Reparto:** `op_tranceria` / `password123`
-        * **Tecnico MAMU:** `tecnico_mamu` / `mamu2026`
-        * **Responsabile MAMU:** `admin_mamu` / `admin2026`
-        """)
 
 
 def logout():
@@ -327,8 +348,6 @@ def logout():
         "reparto_utente",
     ]:
         st.session_state[key] = None if key != "autenticato" else False
-
-    # Rimuove il parametro dall'URL al logout
     st.query_params.clear()
     st.rerun()
 
@@ -346,6 +365,16 @@ else:
 
     if st.sidebar.button("🚪 Disconnetti (Logout)"):
         logout()
+
+    st.sidebar.markdown("---")
+
+    # PULSANTE TEST TELEGRAM IN SIDEBAR
+    if st.sidebar.button("🧪 Test Notifica Telegram"):
+        esito = invia_notifica_telegram(
+            "🔔 *TEST MAMU CMMS*\nQuesto è un messaggio di prova dal sistema di manutenzione MAMU!"
+        )
+        if esito:
+            st.sidebar.success("Notifica inviata su Telegram!")
 
     st.sidebar.markdown("---")
 
@@ -373,7 +402,7 @@ else:
     LISTA_MACCHINE = df_macchine_all["nome"].tolist()
 
     # ---------------------------------------------------------
-    # 1. NUOVA SEGNALAZIONE
+    # 1. NUOVA SEGNALAZIONE (Con invio automatico Telegram)
     # ---------------------------------------------------------
     if menu == "➕ Nuova Segnalazione":
         st.subheader("Invia una nuova segnalazione di manutenzione")
@@ -438,12 +467,25 @@ else:
                                 st.session_state["username"],
                             ),
                         )
+
+                    # INVIO NOTIFICA AUTOMATICA SU TELEGRAM
+                    msg_telegram = (
+                        f"🚨 *NUOVA SEGNALAZIONE MANUTENZIONE*\n\n"
+                        f"📍 *Reparto:* {reparto}\n"
+                        f"⚙️ *Macchinario:* {macchinario}\n"
+                        f"⚡ *Tipo:* {tipo_intervento}\n"
+                        f"🔥 *Priorità:* {priorita}\n"
+                        f"📝 *Note:* {descrizione}\n"
+                        f"👤 *Inviato da:* {st.session_state['nome_utente']}"
+                    )
+                    invia_notifica_telegram(msg_telegram)
+
                     st.success(
-                        f"Ticket inviato con successo per il macchinario {macchinario}!"
+                        f"Ticket inviato con successo e notifica Telegram spedita!"
                     )
 
     # ---------------------------------------------------------
-    # 2. TICKETS & ORDINI DI LAVORO (MAMU)
+    # 2. TICKETS & ORDINI DI LAVORO
     # ---------------------------------------------------------
     elif menu == "🔧 Tickets & Ordini di Lavoro":
         st.subheader(
@@ -619,6 +661,12 @@ else:
                             ),
                         )
 
+                    # Notifica Telegram quando un guasto viene risolto
+                    if nuovo_stato == "Risolta":
+                        invia_notifica_telegram(
+                            f"✅ *GUASTO RISOLTO*\nTicket #{id_selezionato} per *{rec['macchinario']}* chiuso dal tecnico {tecnico}."
+                        )
+
                     st.success(
                         f"Ordine di lavoro #{id_selezionato} aggiornato con successo!"
                     )
@@ -679,6 +727,9 @@ else:
                         (nuova_scad, id_prev),
                     )
 
+                invia_notifica_telegram(
+                    f"📅 *MANUTENZIONE PREVENTIVA AVVIATA*\nGenerato ordine di lavoro per *{piano_sel['macchinario']}*: {piano_sel['titolo']}"
+                )
                 st.success(
                     f"Generato con successo Ordine di Lavoro Preventivo per {piano_sel['macchinario']}!"
                 )
