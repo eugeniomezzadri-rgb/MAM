@@ -1,14 +1,16 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import sqlite3
 import pandas as pd
 import streamlit as st
 
 # ---------------------------------------------------------
-# CONFIGURAZIONE PAGINA
+# CONFIGURAZIONE PAGINA STREAMLIT
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Portale Manutenzioni MAM", page_icon="🛠️", layout="wide"
+    page_title="MAMU CMMS - Gestione Manutenzioni",
+    page_icon="🏭",
+    layout="wide",
 )
 
 # Costanti di sistema
@@ -20,13 +22,19 @@ REPARTI = [
     "TRANCERIA",
     "FISSAGGI",
 ]
-TIPI_INTERVENTO = ["Elettrico", "Meccanico", "Elettro-meccanico", "Altro"]
+TIPI_INTERVENTO = [
+    "Elettrico",
+    "Meccanico",
+    "Elettro-meccanico",
+    "Idraulico/Pneumatico",
+    "Preventivo",
+    "Altro",
+]
 PRIORITA = ["Bassa", "Media", "Alta", "Urgente (Fermo Macchina)"]
 STATI = ["Aperta", "In Corso", "Risolta", "Annullata"]
+COSTO_ORARIO_MANODOPERA = 35.0  # €/ora predefinito per il calcolo costi MAMU
 
-# ---------------------------------------------------------
-# GESTIONE UTENTI (PASSWORD HASHED)
-# ---------------------------------------------------------
+# Utenti aziendali (Demo)
 UTENTI_DB = {
     "op_attrezzeria": {
         "nome": "Operatore Attrezzeria",
@@ -34,23 +42,23 @@ UTENTI_DB = {
         "ruolo": "Reparto",
         "reparto": "ATTREZZERIA",
     },
-    "op_montaggi": {
-        "nome": "Operatore Montaggi",
+    "op_tranceria": {
+        "nome": "Operatore Tranceria",
         "password_hash": hashlib.sha256("password123".encode()).hexdigest(),
         "ruolo": "Reparto",
-        "reparto": "MONTAGGI",
+        "reparto": "TRANCERIA",
     },
-    "tecnico_mam": {
-        "nome": "Luca Bianchi (Tecnico MAM)",
-        "password_hash": hashlib.sha256("mam2026".encode()).hexdigest(),
-        "ruolo": "MAM",
-        "reparto": "MAM",
+    "tecnico_mamu": {
+        "nome": "Luca Bianchi (Tecnico MAMU)",
+        "password_hash": hashlib.sha256("mamu2026".encode()).hexdigest(),
+        "ruolo": "MAMU",
+        "reparto": "MAMU",
     },
-    "admin_mam": {
-        "nome": "Responsabile MAM",
+    "admin_mamu": {
+        "nome": "Responsabile MAMU",
         "password_hash": hashlib.sha256("admin2026".encode()).hexdigest(),
-        "ruolo": "MAM",
-        "reparto": "MAM",
+        "ruolo": "MAMU",
+        "reparto": "MAMU",
     },
 }
 
@@ -60,15 +68,30 @@ def verify_password(password, hashed_password):
 
 
 # ---------------------------------------------------------
-# DATABASE SQLITE & MIGRATION AUTOMATICA
+# DATABASE SQLITE E INIZIALIZZAZIONE STRUTTURA CMMS
 # ---------------------------------------------------------
 def get_connection():
-    return sqlite3.connect("manutenzioni_mam.db")
+    return sqlite3.connect("mamu_cmms.db")
 
 
 def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
+
+        # 1. Registro Macchine (Assets)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS macchine (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codice TEXT UNIQUE,
+                nome TEXT,
+                reparto TEXT,
+                modello TEXT,
+                anno_installazione INTEGER,
+                stato TEXT DEFAULT 'Operativa'
+            )
+        """)
+
+        # 2. Ticket / Ordini di Lavoro
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS richieste (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,26 +105,105 @@ def init_db():
                 tecnico_mam TEXT,
                 note_mam TEXT,
                 utente_creatore TEXT,
-                data_chiusura TEXT
+                data_chiusura TEXT,
+                ore_impiegate REAL DEFAULT 0.0,
+                costo_ricambi REAL DEFAULT 0.0,
+                costo_totale REAL DEFAULT 0.0,
+                origine TEXT DEFAULT 'Guasto'
             )
         """)
 
-        cursor.execute("PRAGMA table_info(richieste)")
-        colonne = [col[1] for col in cursor.fetchall()]
-        if "utente_creatore" not in colonne:
-            cursor.execute(
-                "ALTER TABLE richieste ADD COLUMN utente_creatore TEXT"
+        # 3. Magazzino Ricambi
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ricambi (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codice TEXT UNIQUE,
+                nome TEXT,
+                quantita INTEGER,
+                soglia_minima INTEGER,
+                costo_unitario REAL
             )
-        if "data_chiusura" not in colonne:
-            cursor.execute(
-                "ALTER TABLE richieste ADD COLUMN data_chiusura TEXT"
+        """)
+
+        # 4. Registro Consumo Ricambi negli Interventi
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS utilizzi_ricambi (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                richiesta_id INTEGER,
+                ricambio_id INTEGER,
+                quantita INTEGER,
+                costo_totale REAL,
+                FOREIGN KEY(richiesta_id) REFERENCES richieste(id),
+                FOREIGN KEY(ricambio_id) REFERENCES ricambi(id)
+            )
+        """)
+
+        # 5. Schedulario Manutenzione Preventiva
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS piani_preventivi (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                macchinario TEXT,
+                titolo TEXT,
+                frequenza_giorni INTEGER,
+                prossima_scadenza TEXT,
+                descrizione TEXT
+            )
+        """)
+
+        # Popolamento dati demo iniziali se vuoto
+        cursor.execute("SELECT COUNT(*) FROM macchine")
+        if cursor.fetchone()[0] == 0:
+            cursor.executemany(
+                """
+                INSERT INTO macchine (codice, nome, reparto, modello, anno_installazione, stato)
+                VALUES (?, ?, ?, ?, ?, 'Operativa')
+            """,
+                [
+                    ("MAC-01", "Trancia Idraulica T-04", "TRANCERIA", "Schuler 200T", 2018),
+                    ("MAC-02", "Isola Verniciatura V-01", "VERNICIATURA", "Gema Powder", 2020),
+                    ("MAC-03", "Nastro Confezionamento C-02", "CONFEZIONAMENTO", "FlexLink", 2021),
+                    ("MAC-04", "Centro Lavoro CNC A-01", "ATTREZZERIA", "Haas VF-2", 2019),
+                    ("MAC-05", "Avvitatore Multimandrino M-03", "MONTAGGI", "Atlas Copco", 2022),
+                    ("MAC-06", "Pressa Fissaggi F-01", "FISSAGGI", "Promeccanica", 2017),
+                ],
+            )
+
+        cursor.execute("SELECT COUNT(*) FROM ricambi")
+        if cursor.fetchone()[0] == 0:
+            cursor.executemany(
+                """
+                INSERT INTO ricambi (codice, nome, quantita, soglia_minima, costo_unitario)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                [
+                    ("RIC-101", "Cuscinetto SKF 6204-2RSH", 12, 5, 14.50),
+                    ("RIC-102", "Sensore Prossimità PNP M12", 4, 3, 38.00),
+                    ("RIC-103", "Filtro Olio Idraulico FX-12", 2, 4, 45.00),
+                    ("RIC-104", "Elettrovalvola 5/2 24VDC", 8, 2, 65.00),
+                    ("RIC-105", "Cinghia Dentata HTD 8M", 3, 3, 22.00),
+                ],
+            )
+
+        cursor.execute("SELECT COUNT(*) FROM piani_preventivi")
+        if cursor.fetchone()[0] == 0:
+            scadenza_prossima = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+            cursor.executemany(
+                """
+                INSERT INTO piani_preventivi (macchinario, titolo, frequenza_giorni, prossima_scadenza, descrizione)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                [
+                    ("Trancia Idraulica T-04", "Cambio olio idraulico e filtri", 90, scadenza_prossima, "Sostituire olio e verificare usura guarnizioni stelo."),
+                    ("Isola Verniciatura V-01", "Pulizia ugelli e calibrazione", 30, scadenza_prossima, "Pulizia approfondita pistole e controllo aspirazione."),
+                    ("Centro Lavoro CNC A-01", "Controllo gioco assi e lubrificazione", 60, scadenza_prossima, "Ingrassaggio guide e verifica calibrazione mandrino."),
+                ],
             )
 
 
 init_db()
 
 # ---------------------------------------------------------
-# SESSIONE ED AUTENTICAZIONE
+# AUTENTICAZIONE E SESSIONE
 # ---------------------------------------------------------
 if "autenticato" not in st.session_state:
     st.session_state["autenticato"] = False
@@ -112,8 +214,8 @@ if "autenticato" not in st.session_state:
 
 
 def login_screen():
-    st.title("🛠️ Portale Manutenzioni MAM - Accesso")
-    st.subheader("Inserisci le tue credenziali aziendali")
+    st.title("🏭 MAMU CMMS - Accesso al Portale")
+    st.subheader("Sistema Integrato Manutenzioni & Gestione Asset")
 
     col_login, _ = st.columns([1, 1])
     with col_login:
@@ -123,9 +225,7 @@ def login_screen():
             btn_login = st.form_submit_button("Accedi")
 
             if btn_login:
-                if username in UTENTI_DB and verify_password(
-                    password, UTENTI_DB[username]["password_hash"]
-                ):
+                if username in UTENTI_DB and verify_password(password, UTENTI_DB[username]["password_hash"]):
                     user_info = UTENTI_DB[username]
                     st.session_state["autenticato"] = True
                     st.session_state["username"] = username
@@ -138,20 +238,16 @@ def login_screen():
                     st.error("Username o password non corretti.")
 
         st.info("""
-        **Credenziali Demo per Prova:**
-        * **Operatore Attrezzeria:** `op_attrezzeria` / `password123`
-        * **Operatore Montaggi:** `op_montaggi` / `password123`
-        * **Tecnico MAM:** `tecnico_mam` / `mam2026`
-        * **Admin MAM:** `admin_mam` / `admin2026`
+        **Credenziali Demo per la prova:**
+        * **Operatore Reparto:** `op_tranceria` / `password123`
+        * **Tecnico MAMU:** `tecnico_mamu` / `mamu2026`
+        * **Responsabile MAMU:** `admin_mamu` / `admin2026`
         """)
 
 
 def logout():
-    st.session_state["autenticato"] = False
-    st.session_state["username"] = None
-    st.session_state["ruolo"] = None
-    st.session_state["nome_utente"] = None
-    st.session_state["reparto_utente"] = None
+    for key in ["autenticato", "username", "ruolo", "nome_utente", "reparto_utente"]:
+        st.session_state[key] = None if key != "autenticato" else False
     st.rerun()
 
 
@@ -161,79 +257,83 @@ def logout():
 if not st.session_state["autenticato"]:
     login_screen()
 else:
+    # Sidebar laterale
     st.sidebar.title(f"👤 {st.session_state['nome_utente']}")
-    st.sidebar.caption(
-        f"**Ruolo:** {st.session_state['ruolo']} | **Reparto:** {st.session_state['reparto_utente']}"
-    )
+    st.sidebar.caption(f"**Ruolo:** {st.session_state['ruolo']} | **Reparto:** {st.session_state['reparto_utente']}")
 
     if st.sidebar.button("🚪 Disconnetti (Logout)"):
         logout()
 
     st.sidebar.markdown("---")
 
-    # Menu dinamico in base al ruolo
-    if st.session_state["ruolo"] == "MAM":
+    # Menu in base al ruolo
+    if st.session_state["ruolo"] == "MAMU":
         opzioni_menu = [
-            "Gestione Interventi (MAM)",
-            "Nuova Richiesta",
-            "Analisi & Report",
+            "🔧 Tickets & Ordini di Lavoro",
+            "📅 Manutenzione Preventiva",
+            "📦 Ricambi & Magazzino",
+            "📊 KPI & Controllo Costi",
+            "🏭 Diario di Bordo Assets",
+            "➕ Nuova Segnalazione",
         ]
     else:
-        opzioni_menu = ["Nuova Richiesta", "I Miei Interventi"]
+        opzioni_menu = [
+            "➕ Nuova Segnalazione",
+            "📋 I Miei Interventi",
+            "🏭 Diario di Bordo Assets",
+        ]
 
-    menu = st.sidebar.radio("Navigazione", opzioni_menu)
-    st.title("🛠️ Portale Gestione Manutenzioni MAM")
+    menu = st.sidebar.radio("Navigazione CMMS", opzioni_menu)
+    st.title("🏭 MAMU CMMS - Gestione Manutenzione Industriale")
+
+    # Lista Macchinari aggiornata dal DB
+    with get_connection() as conn:
+        df_macchine_all = pd.read_sql_query("SELECT * FROM macchine", conn)
+    LISTA_MACCHINE = df_macchine_all["nome"].tolist()
 
     # ---------------------------------------------------------
-    # 1. NUOVA RICHIESTA
+    # 1. NUOVA SEGNALAZIONE
     # ---------------------------------------------------------
-    if menu == "Nuova Richiesta":
+    if menu == "➕ Nuova Segnalazione":
         st.subheader("Invia una nuova segnalazione di manutenzione")
 
         with st.form("form_richiesta", clear_on_submit=True):
             col1, col2 = st.columns(2)
 
             with col1:
-                if st.session_state["ruolo"] == "MAM":
-                    reparto = st.selectbox("Reparto richiedente *", REPARTI)
+                if st.session_state["ruolo"] == "MAMU":
+                    reparto = st.selectbox("Reparto *", REPARTI)
                 else:
                     reparto = st.selectbox(
-                        "Reparto richiedente *",
+                        "Reparto *",
                         options=[st.session_state["reparto_utente"]],
                         disabled=True,
                     )
 
-                macchinario = st.text_input(
-                    "Macchinario / Sigla Impianto *",
-                    placeholder="es. Trancia T-04",
-                )
-                tipo_intervento = st.selectbox(
-                    "Tipo Intervento", TIPI_INTERVENTO
-                )
+                # Macchine filtrate per reparto
+                macchine_filtrate = df_macchine_all[df_macchine_all["reparto"] == reparto]["nome"].tolist()
+                if not macchine_filtrate:
+                    macchine_filtrate = LISTA_MACCHINE
+
+                macchinario = st.selectbox("Macchinario / Asset *", macchine_filtrate)
+                tipo_intervento = st.selectbox("Tipo Intervento", TIPI_INTERVENTO)
 
             with col2:
-                priorita = st.select_slider(
-                    "Livello di Priorità *", options=PRIORITA, value="Media"
-                )
-                descrizione = st.text_area(
-                    "Descrizione del guasto o intervento richiesto *",
-                    placeholder="Descrivi dettagliatamente il problema...",
-                )
+                priorita = st.select_slider("Livello di Priorità *", options=PRIORITA, value="Media")
+                descrizione = st.text_area("Descrizione Guasto / Anomalia *", placeholder="Descrivi il problema riscontrato...")
 
-            submitted = st.form_submit_button("🚀 Invia Richiesta a MAM")
+            submitted = st.form_submit_button("🚀 Invia Richiesta a MAMU")
 
             if submitted:
-                if not macchinario or not descrizione:
-                    st.error("Compilare tutti i campi obbligatori (*).")
+                if not descrizione:
+                    st.error("Inserire una descrizione del problema.")
                 else:
-                    data_ora_apertura = datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
+                    data_ora_apertura = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     with get_connection() as conn:
                         conn.execute(
                             """
-                            INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore, data_chiusura)
-                            VALUES (?, ?, ?, ?, ?, ?, 'Aperta', '', '', ?, '')
+                            INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore, data_chiusura, origine)
+                            VALUES (?, ?, ?, ?, ?, ?, 'Aperta', '', '', ?, '', 'Guasto')
                         """,
                             (
                                 data_ora_apertura,
@@ -245,32 +345,384 @@ else:
                                 st.session_state["username"],
                             ),
                         )
-                    st.success(
-                        f"Richiesta inoltrata con successo al team MAM per il reparto {reparto} in data {data_ora_apertura}!"
-                    )
+                    st.success(f"Ticket inviato con successo per il macchinario {macchinario}!")
 
     # ---------------------------------------------------------
-    # 2. I MIEI INTERVENTI (Solo Reparti)
+    # 2. TICKETS & ORDINI DI LAVORO (MAMU)
     # ---------------------------------------------------------
-    elif menu == "I Miei Interventi":
-        st.subheader(
-            f"Stato interventi per il reparto: {st.session_state['reparto_utente']}"
-        )
+    elif menu == "🔧 Tickets & Ordini di Lavoro":
+        st.subheader("Gestione Ordini di Lavoro & Interventi Tecnico-Elettromeccanici")
 
         with get_connection() as conn:
-            df = pd.read_sql_query(
+            df_ticket = pd.read_sql_query("SELECT * FROM richieste ORDER BY id DESC", conn)
+
+        if df_ticket.empty:
+            st.info("Nessun ordine di lavoro presente.")
+        else:
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                filtro_stato = st.multiselect("Filtra per Stato", STATI, default=["Aperta", "In Corso"])
+            with col_f2:
+                filtro_reparto = st.multiselect("Filtra per Reparto", REPARTI)
+
+            df_filtrato = df_ticket.copy()
+            if filtro_stato:
+                df_filtrato = df_filtrato[df_filtrato["stato"].isin(filtro_stato)]
+            if filtro_reparto:
+                df_filtrato = df_filtrato[df_filtrato["reparto"].isin(filtro_reparto)]
+
+            st.dataframe(df_filtrato, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.write("### 🛠️ Gestione & Chiusura Ordine di Lavoro")
+
+            col_id, _ = st.columns([1, 2])
+            with col_id:
+                id_selezionato = st.selectbox("Seleziona ID Ticket", options=df_ticket["id"].tolist())
+
+            rec = df_ticket[df_ticket["id"] == id_selezionato].iloc[0]
+
+            st.caption(
+                f"Modifica ID #{id_selezionato} | **Macchina:** {rec['macchinario']} | **Reparto:** {rec['reparto']} | **Apertura:** {rec['data_ora']}"
+            )
+
+            with st.form("form_aggiorna_odl"):
+                col_u1, col_u2, col_u3 = st.columns(3)
+
+                with col_u1:
+                    nuovo_stato = st.selectbox("Stato Intervento", STATI, index=STATI.index(rec["stato"]))
+                    nuovo_tipo = st.selectbox(
+                        "Tipo Intervento",
+                        TIPI_INTERVENTO,
+                        index=TIPI_INTERVENTO.index(rec["tipo_intervento"]) if rec["tipo_intervento"] in TIPI_INTERVENTO else 0,
+                    )
+                    tecnico = st.text_input("Tecnico MAMU Assegnato", value=rec["tecnico_mam"] or st.session_state["nome_utente"])
+
+                with col_u2:
+                    ore_impiegate = st.number_input(
+                        "Ore Lavoro Impiegate",
+                        min_value=0.0,
+                        value=float(rec["ore_impiegate"]),
+                        step=0.5,
+                    )
+                    st.caption(f"Costo Manodopera: € {ore_impiegate * COSTO_ORARIO_MANODOPERA:.2f} ({COSTO_ORARIO_MANODOPERA}€/h)")
+
+                    # Sezione Ricambi
+                    with get_connection() as conn:
+                        df_ricambi_select = pd.read_sql_query("SELECT * FROM ricambi WHERE quantita > 0", conn)
+
+                    ricambio_scelto = st.selectbox(
+                        "Aggiungi Ricambio dal Magazzino",
+                        options=["Nessuno"] + df_ricambi_select["nome"].tolist(),
+                    )
+                    qta_ricambio = st.number_input("Quantità Ricambio Usata", min_value=1, value=1, step=1)
+
+                with col_u3:
+                    note = st.text_area("Note Tecniche / Dettaglio Riparazione", value=rec["note_mam"] or "")
+
+                btn_salva = st.form_submit_button("💾 Aggiorna & Salva Ordine di Lavoro")
+
+                if btn_salva:
+                    costo_manodopera = ore_impiegate * COSTO_ORARIO_MANODOPERA
+                    costo_ricambio_aggiunto = 0.0
+
+                    # Gestione Scarico Magazzino
+                    if ricambio_scelto != "Nessuno":
+                        ric_row = df_ricambi_select[df_ricambi_select["nome"] == ricambio_scelto].iloc[0]
+                        ric_id = int(ric_row["id"])
+                        costo_un = float(ric_row["costo_unitario"])
+                        costo_ricambio_aggiunto = costo_un * qta_ricambio
+
+                        with get_connection() as conn:
+                            # Registra utilizzo
+                            conn.execute(
+                                """
+                                INSERT INTO utilizzi_ricambi (richiesta_id, ricambio_id, quantita, costo_totale)
+                                VALUES (?, ?, ?, ?)
+                            """,
+                                (id_selezionato, ric_id, qta_ricambio, costo_ricambio_aggiunto),
+                            )
+                            # Scala giacenza
+                            conn.execute(
+                                "UPDATE ricambi SET quantita = quantita - ? WHERE id = ?",
+                                (qta_ricambio, ric_id),
+                            )
+
+                    costo_ricambi_totale = float(rec["costo_ricambi"]) + costo_ricambio_aggiunto
+                    costo_totale_finale = costo_manodopera + costo_ricambi_totale
+
+                    # Gestione Data Chiusura
+                    chiusura_dt = rec["data_chiusura"]
+                    if nuovo_stato in ["Risolta", "Annullata"]:
+                        if not chiusura_dt:
+                            chiusura_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    else:
+                        chiusura_dt = ""
+
+                    with get_connection() as conn:
+                        conn.execute(
+                            """
+                            UPDATE richieste 
+                            SET stato = ?, tipo_intervento = ?, tecnico_mam = ?, note_mam = ?, 
+                                ore_impiegate = ?, costo_ricambi = ?, costo_totale = ?, data_chiusura = ?
+                            WHERE id = ?
+                        """,
+                            (
+                                nuovo_stato,
+                                nuovo_tipo,
+                                tecnico,
+                                note,
+                                ore_impiegate,
+                                costo_ricambi_totale,
+                                costo_totale_finale,
+                                chiusura_dt,
+                                id_selezionato,
+                            ),
+                        )
+
+                    st.success(f"Ordine di lavoro #{id_selezionato} aggiornato con successo!")
+                    st.rerun()
+
+    # ---------------------------------------------------------
+    # 3. MANUTENZIONE PREVENTIVA
+    # ---------------------------------------------------------
+    elif menu == "📅 Manutenzione Preventiva":
+        st.subheader("Pianificazione & Schedulario Manutenzioni Preventive")
+
+        with get_connection() as conn:
+            df_prev = pd.read_sql_query("SELECT * FROM piani_preventivi", conn)
+
+        col_p1, col_p2 = st.columns([2, 1])
+
+        with col_p1:
+            st.write("### Piani di Manutenzione Attivi")
+            st.dataframe(df_prev, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.write("### ⚡ Genera Ordine di Lavoro da Piano Preventivo")
+            id_prev = st.selectbox("Seleziona Piano da eseguire", df_prev["id"].tolist())
+            piano_sel = df_prev[df_prev["id"] == id_prev].iloc[0]
+
+            if st.button("🚀 Genera Ordine di Lavoro Preventivo"):
+                data_ora_apertura = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Trova reparto macchinario
+                reparto_m = df_macchine_all[df_macchine_all["nome"] == piano_sel["macchinario"]]["reparto"].values[0]
+
+                with get_connection() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO richieste (data_ora, reparto, macchinario, tipo_intervento, priorita, descrizione, stato, tecnico_mam, note_mam, utente_creatore, data_chiusura, origine)
+                        VALUES (?, ?, ?, 'Preventivo', 'Media', ?, 'Aperta', '', '', 'SCHEDULER_MAMU', '', 'Preventiva')
+                    """,
+                        (
+                            data_ora_apertura,
+                            reparto_m,
+                            piano_sel["macchinario"],
+                            f"[PREVENTIVA PROGRAMMATA] {piano_sel['titolo']}: {piano_sel['descrizione']}",
+                        ),
+                    )
+
+                    # Aggiorna prossima scadenza
+                    nuova_scad = (datetime.now() + timedelta(days=int(piano_sel["frequenza_giorni"]))).strftime("%Y-%m-%d")
+                    conn.execute(
+                        "UPDATE piani_preventivi SET prossima_scadenza = ? WHERE id = ?",
+                        (nuova_scad, id_prev),
+                    )
+
+                st.success(f"Generato con successo Ordine di Lavoro Preventivo per {piano_sel['macchinario']}!")
+                st.rerun()
+
+        with col_p2:
+            st.write("### ➕ Aggiungi Piano Preventivo")
+            with st.form("form_nuovo_piano", clear_on_submit=True):
+                m_prev = st.selectbox("Macchinario", LISTA_MACCHINE)
+                titolo_p = st.text_input("Titolo Piano", placeholder="es. Controllo Filtri")
+                freq_giorni = st.number_input("Frequenza (Giorni)", min_value=1, value=30, step=5)
+                desc_p = st.text_area("Descrizione Operazioni")
+                scad_in) = st.date_input("Prima Scadenza", datetime.now() + timedelta(days=30))
+
+                btn_p = st.form_submit_button("Crea Piano Preventivo")
+                if btn_p:
+                    with get_connection() as conn:
+                        conn.execute(
+                            """
+                            INSERT INTO piani_preventivi (macchinario, titolo, frequenza_giorni, prossima_scadenza, descrizione)
+                            VALUES (?, ?, ?, ?, ?)
+                        """,
+                            (m_prev, titolo_p, freq_giorni, scad_in).strftime("%Y-%m-%d"), desc_p),
+                        )
+                    st.success("Piano preventivo inserito!")
+                    st.rerun()
+
+    # ---------------------------------------------------------
+    # 4. RICAMBI & MAGAZZINO TECNICO
+    # ---------------------------------------------------------
+    elif menu == "📦 Ricambi & Magazzino":
+        st.subheader("Gestione Giacenze Ricambi e Componenti Tecnici")
+
+        with get_connection() as conn:
+            df_ricambi = pd.read_sql_query("SELECT * FROM ricambi", conn)
+
+        # Evidenzia sotto-scorta
+        df_ricambi["Stato Scorta"] = df_ricambi.apply(
+            lambda r: "⚠️ SOTTO SCORTA" if r["quantita"] <= r["soglia_minima"] else "OK",
+            axis=1,
+        )
+
+        st.dataframe(df_ricambi, use_container_width=True, hide_index=True)
+
+        col_r1, col_r2 = st.columns(2)
+
+        with col_r1:
+            st.write("### ➕ Aggiungi Nuovo Ricambio")
+            with st.form("form_ricambio"):
+                c_ric = st.text_input("Codice Ricambio", placeholder="RIC-999")
+                n_ric = st.text_input("Nome / Descrizione Componente")
+                q_ric = st.number_input("Giacenza Iniziale", min_value=0, value=5)
+                s_ric = st.number_input("Soglia Minima Riordino", min_value=1, value=2)
+                p_ric = st.number_input("Costo Unitario (€)", min_value=0.0, value=10.0, step=1.0)
+
+                if st.form_submit_button("Salva Ricambio"):
+                    with get_connection() as conn:
+                        conn.execute(
+                            """
+                            INSERT INTO ricambi (codice, nome, quantita, soglia_minima, costo_unitario)
+                            VALUES (?, ?, ?, ?, ?)
+                        """,
+                            (c_ric, n_ric, q_ric, s_ric, p_ric),
+                        )
+                    st.success("Ricambio registrato in magazzino!")
+                    st.rerun()
+
+        with col_r2:
+            st.write("### 🔄 Carico / Riordino Magazzino")
+            with st.form("form_carico"):
+                id_r_carico = st.selectbox("Ricambio da Ricaricare", df_ricambi["id"].tolist())
+                qta_carico = st.number_input("Quantità da Aggiungere", min_value=1, value=5)
+
+                if st.form_submit_button("Aggiorna Giacenza"):
+                    with get_connection() as conn:
+                        conn.execute(
+                            "UPDATE ricambi SET quantita = quantita + ? WHERE id = ?",
+                            (qta_carico, id_r_carico),
+                        )
+                    st.success("Giacenza aggiornata con successo!")
+                    st.rerun()
+
+    # ---------------------------------------------------------
+    # 5. KPI & CONTROLLO COSTI
+    # ---------------------------------------------------------
+    elif menu == "📊 KPI & Controllo Costi":
+        st.subheader("Indicatori Chiave di Performance (KPI) & Analytics Costi")
+
+        with get_connection() as conn:
+            df_kpi = pd.read_sql_query("SELECT * FROM richieste", conn)
+
+        if df_kpi.empty:
+            st.info("Nessun dato disponibile per il calcolo dei KPI.")
+        else:
+            # Calcolo MTTR (Mean Time To Repair)
+            df_risolte = df_kpi[(df_kpi["stato"] == "Risolta") & (df_kpi["data_chiusura"] != "")].copy()
+
+            mttr_str = "N/D"
+            if not df_risolte.empty:
+                df_risolte["dt_apertura"] = pd.to_datetime(df_risolte["data_ora"], errors="coerce")
+                df_risolte["dt_chiusura"] = pd.to_datetime(df_risolte["data_chiusura"], errors="coerce")
+                df_risolte["ore_totali"] = (df_risolte["dt_chiusura"] - df_risolte["dt_apertura"]).dt.total_seconds() / 3600
+                mttr_val = df_risolte["ore_totali"].mean()
+                if pd.notna(mttr_val):
+                    mttr_str = f"{mttr_val:.1f} ore"
+
+            costo_totale_azienda = df_kpi["costo_totale"].sum()
+            ore_totali_lavorate = df_kpi["ore_impiegate"].sum()
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("MTTR (Tempo Medio Riparazione)", mttr_str)
+            k2.metric("Costo Totale Manutenzione", f"€ {costo_totale_azienda:,.2f}")
+            k3.metric("Ore Manodopera Totali", f"{ore_totali_lavorate:.1f} h")
+            k4.metric("Interventi Preventivi vs Guasti", f"{len(df_kpi[df_kpi['origine']=='Preventiva'])} / {len(df_kpi[df_kpi['origine']=='Guasto'])}")
+
+            st.markdown("---")
+            col_g1, col_g2 = st.columns(2)
+
+            with col_g1:
+                st.write("**Costo Totale Manutenzione per Reparto (€)**")
+                chart_costi_reparto = df_kpi.groupby("reparto")["costo_totale"].sum()
+                st.bar_chart(chart_costi_reparto)
+
+            with col_g2:
+                st.write("**Numero Interventi per Macchinario**")
+                chart_macchine = df_kpi["macchinario"].value_counts()
+                st.bar_chart(chart_macchine)
+
+    # ---------------------------------------------------------
+    # 6. DIARIO DI BORDO ASSETS (STORICO MACCHINA)
+    # ---------------------------------------------------------
+    elif menu == "🏭 Diario di Bordo Assets":
+        st.subheader("Registro Assets & Storico Integrato Macchine")
+
+        macchina_sel = st.selectbox("Seleziona Macchinario da consultare", LISTA_MACCHINE)
+
+        # Dettagli Macchina
+        info_m = df_macchine_all[df_macchine_all["nome"] == macchina_sel].iloc[0]
+
+        c_a1, c_a2, c_a3, c_a4 = st.columns(4)
+        c_a1.info(f"**Codice:** {info_m['codice']}")
+        c_a2.info(f"**Reparto:** {info_m['reparto']}")
+        c_a3.info(f"**Modello:** {info_m['modello']}")
+        c_a4.info(f"**Anno:** {info_m['anno_installazione']}")
+
+        st.markdown("---")
+        st.write(f"### 📜 Cronologia Interventi e Manutenzioni per: **{macchina_sel}**")
+
+        with get_connection() as conn:
+            df_storico = pd.read_sql_query(
+                """
+                SELECT 
+                    id AS [ID Ticket],
+                    data_ora AS [Data Apertura],
+                    data_chiusura AS [Data Chiusura],
+                    tipo_intervento AS [Tipo],
+                    priorita AS [Priorità],
+                    descrizione AS [Guasto / Oggetto],
+                    stato AS [Stato],
+                    tecnico_mam AS [Tecnico],
+                    ore_impiegate AS [Ore],
+                    costo_totale AS [Costo Totale €],
+                    note_mam AS [Note Intervento]
+                FROM richieste 
+                WHERE macchinario = ? 
+                ORDER BY id DESC
+            """,
+                conn,
+                params=(macchina_sel,),
+            )
+
+        if df_storico.empty:
+            st.warning("Nessun intervento registrato nello storico per questa macchina.")
+        else:
+            st.dataframe(df_storico, use_container_width=True, hide_index=True)
+
+    # ---------------------------------------------------------
+    # 7. I MIEI INTERVENTI (Solo per Reparti)
+    # ---------------------------------------------------------
+    elif menu == "📋 I Miei Interventi":
+        st.subheader(f"Richieste Manutenzione Reparto: {st.session_state['reparto_utente']}")
+
+        with get_connection() as conn:
+            df_miei = pd.read_sql_query(
                 """
                 SELECT 
                     id AS [ID], 
-                    data_ora AS [Data Apertura], 
-                    data_chiusura AS [Data Chiusura], 
+                    data_ora AS [Apertura], 
+                    data_chiusura AS [Chiusura], 
                     macchinario AS [Macchinario], 
-                    tipo_intervento AS [Tipo Intervento], 
+                    tipo_intervento AS [Tipo], 
                     priorita AS [Priorità], 
                     descrizione AS [Descrizione], 
                     stato AS [Stato], 
-                    tecnico_mam AS [Tecnico MAM], 
-                    note_mam AS [Note MAM] 
+                    tecnico_mam AS [Tecnico MAMU], 
+                    note_mam AS [Note / Soluzione] 
                 FROM richieste 
                 WHERE reparto = ? 
                 ORDER BY id DESC
@@ -279,209 +731,7 @@ else:
                 params=(st.session_state["reparto_utente"],),
             )
 
-        if df.empty:
+        if df_miei.empty:
             st.info("Nessuna richiesta inserita per il tuo reparto.")
         else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # ---------------------------------------------------------
-    # 3. GESTIONE INTERVENTI (Solo MAM)
-    # ---------------------------------------------------------
-    elif menu == "Gestione Interventi (MAM)":
-        if st.session_state["ruolo"] != "MAM":
-            st.error("Accesso non autorizzato. Sezione riservata al team MAM.")
-        else:
-            st.subheader("Pannello Controllo Manutenzioni - Team MAM")
-
-            with get_connection() as conn:
-                df = pd.read_sql_query(
-                    "SELECT * FROM richieste ORDER BY id DESC", conn
-                )
-
-            if df.empty:
-                st.info("Nessuna richiesta di manutenzione presente a sistema.")
-            else:
-                col_f1, col_f2 = st.columns(2)
-                with col_f1:
-                    filtro_stato = st.multiselect(
-                        "Filtra per Stato",
-                        STATI,
-                        default=["Aperta", "In Corso"],
-                    )
-                with col_f2:
-                    filtro_reparto = st.multiselect(
-                        "Filtra per Reparto", REPARTI
-                    )
-
-                df_filtrato = df.copy()
-                if filtro_stato:
-                    df_filtrato = df_filtrato[
-                        df_filtrato["stato"].isin(filtro_stato)
-                    ]
-                if filtro_reparto:
-                    df_filtrato = df_filtrato[
-                        df_filtrato["reparto"].isin(filtro_reparto)
-                    ]
-
-                st.dataframe(
-                    df_filtrato, use_container_width=True, hide_index=True
-                )
-
-                st.markdown("---")
-                st.write("### Aggiorna Stato Intervento")
-
-                col_id, _ = st.columns([1, 3])
-
-                with col_id:
-                    id_selezionato = st.selectbox(
-                        "Seleziona ID Richiesta", options=df["id"].tolist()
-                    )
-
-                record_attuale = df[df["id"] == id_selezionato]
-
-                if not record_attuale.empty:
-                    rec = record_attuale.iloc[0]
-                    utente_creatore = (
-                        rec.get("utente_creatore")
-                        if pd.notna(rec.get("utente_creatore"))
-                        else "N/D"
-                    )
-                    dt_apertura = rec.get("data_ora") or "N/D"
-                    dt_chiusura = (
-                        rec.get("data_chiusura")
-                        if pd.notna(rec.get("data_chiusura"))
-                        and rec.get("data_chiusura") != ""
-                        else "In Corso / Aperta"
-                    )
-
-                    st.caption(
-                        f"Modifica ID #{id_selezionato} - **{rec['reparto']}** ({rec['macchinario']}) | **Apertura:** {dt_apertura} | **Chiusura:** {dt_chiusura} | **Inviato da:** {utente_creatore}"
-                    )
-
-                    with st.form("form_aggiorna"):
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            nuovo_stato = st.selectbox(
-                                "Stato",
-                                STATI,
-                                index=STATI.index(rec["stato"])
-                                if rec["stato"] in STATI
-                                else 0,
-                            )
-                            tecnico = st.text_input(
-                                "Tecnico MAM Assegnato",
-                                value=rec["tecnico_mam"]
-                                if pd.notna(rec["tecnico_mam"])
-                                and rec["tecnico_mam"] != ""
-                                else st.session_state["nome_utente"],
-                            )
-                        with c2:
-                            note = st.text_area(
-                                "Note d'intervento / Componenti sostituiti",
-                                value=rec["note_mam"]
-                                if pd.notna(rec["note_mam"])
-                                else "",
-                            )
-
-                        btn_salva = st.form_submit_button("💾 Salva Modifiche")
-
-                        if btn_salva:
-                            # Gestione automatica della Data di Chiusura
-                            chiusura_esistente = (
-                                rec.get("data_chiusura")
-                                if pd.notna(rec.get("data_chiusura"))
-                                else ""
-                            )
-
-                            if nuovo_stato in ["Risolta", "Annullata"]:
-                                if not chiusura_esistente:
-                                    nuova_data_chiusura = (
-                                        datetime.now().strftime(
-                                            "%Y-%m-%d %H:%M:%S"
-                                        )
-                                    )
-                                else:
-                                    nuova_data_chiusura = chiusura_esistente
-                            else:
-                                nuova_data_chiusura = (
-                                    ""  # Resetta se riportata su Aperta/In Corso
-                                )
-
-                            with get_connection() as conn:
-                                conn.execute(
-                                    """
-                                    UPDATE richieste 
-                                    SET stato = ?, tecnico_mam = ?, note_mam = ?, data_chiusura = ?
-                                    WHERE id = ?
-                                """,
-                                    (
-                                        nuovo_stato,
-                                        tecnico,
-                                        note,
-                                        nuova_data_chiusura,
-                                        id_selezionato,
-                                    ),
-                                )
-                            st.success(
-                                f"Richiesta #{id_selezionato} aggiornata!"
-                            )
-                            st.rerun()
-
-    # ---------------------------------------------------------
-    # 4. ANALISI & REPORT (Solo MAM)
-    # ---------------------------------------------------------
-    elif menu == "Analisi & Report":
-        if st.session_state["ruolo"] != "MAM":
-            st.error("Accesso non autorizzato. Sezione riservata al team MAM.")
-        else:
-            st.subheader("Statistiche e Performance Manutenzioni")
-
-            with get_connection() as conn:
-                df = pd.read_sql_query("SELECT * FROM richieste", conn)
-
-            if df.empty:
-                st.info("Dati insufficienti per generare report.")
-            else:
-                # Calcolo Tempo Medio di Risoluzione
-                df_risolte = df[
-                    (df["stato"] == "Risolta")
-                    & (df["data_chiusura"].notna())
-                    & (df["data_chiusura"] != "")
-                ].copy()
-
-                tempo_medio_str = "N/D"
-                if not df_risolte.empty:
-                    df_risolte["dt_apertura"] = pd.to_datetime(
-                        df_risolte["data_ora"], errors="coerce"
-                    )
-                    df_risolte["dt_chiusura"] = pd.to_datetime(
-                        df_risolte["data_chiusura"], errors="coerce"
-                    )
-                    df_risolte["ore_risoluzione"] = (
-                        df_risolte["dt_chiusura"] - df_risolte["dt_apertura"]
-                    ).dt.total_seconds() / 3600
-                    media_ore = df_risolte["ore_risoluzione"].mean()
-                    if pd.notna(media_ore):
-                        tempo_medio_str = f"{media_ore:.1f} ore"
-
-                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-                kpi1.metric("Totale Richieste", len(df))
-                kpi2.metric(
-                    "Aperte / In Corso",
-                    len(df[df["stato"].isin(["Aperta", "In Corso"])]),
-                )
-                kpi3.metric("Risolte", len(df[df["stato"] == "Risolta"]))
-                kpi4.metric("Tempo Medio Risoluzione", tempo_medio_str)
-
-                st.markdown("---")
-                col_c1, col_c2 = st.columns(2)
-
-                with col_c1:
-                    st.write("**Richieste per Reparto**")
-                    chart_reparti = df["reparto"].value_counts()
-                    st.bar_chart(chart_reparti)
-
-                with col_c2:
-                    st.write("**Distribuzione per Priorità**")
-                    chart_prio = df["priorita"].value_counts()
-                    st.bar_chart(chart_prio)
+            st.dataframe(df_miei, use_container_width=True, hide_index=True)
