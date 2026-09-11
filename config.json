@@ -2,10 +2,10 @@
 {
   "smtp_server": "smtp.gmail.com",
   "smtp_port": 587,
-  "sender_email": "eugenio.mezzadri@gmail.com",
-  "sender_password": "sJh--U1u58T$DAh",
+  "sender_email": "eugenio.dri@gmail.com",
+  "sender_password": "s1u58T$DAh",
   "receiver_emails": [
-    "uta@groppalli.it"
+    "uta@lli.it"
   ]
 }
 
