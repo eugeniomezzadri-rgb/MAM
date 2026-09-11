@@ -1,13 +1,11 @@
 
 {
-  "smtp_server": "smtp.office365.com",
+  "smtp_server": "smtp.gmail.com",
   "smtp_port": 587,
-  "sender_email": "mam_cmms@tuaazienda.it",
-  "sender_password": "LA_TUA_PASSWORD_SEGRETA",
+  "sender_email": "eugenio.mezzadri@gmail.com",
+  "sender_password": "sJh--U1u58T$DAh",
   "receiver_emails": [
-    "manutenzione@tuaazienda.it",
-    "responsabile.produzione@tuaazienda.it",
-    "capo.officina@tuaazienda.it"
+    "uta@groppalli.it"
   ]
 }
 
